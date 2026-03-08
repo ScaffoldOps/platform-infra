@@ -4,6 +4,8 @@ metadata:
   name: postgres
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: postgres
@@ -16,6 +18,12 @@ spec:
         - name: postgres
           image: postgres:16
           imagePullPolicy: IfNotPresent
+          lifecycle:
+            postStart:
+              exec:
+                command:
+                  - /bin/bash
+                  - /docker-entrypoint-initdb.d/01-init-multiple-databases.sh
           ports:
             - name: postgres
               containerPort: 5432
@@ -26,8 +34,7 @@ spec:
             - name: postgres-data
               mountPath: /var/lib/postgresql/data
             - name: postgres-init-scripts
-              mountPath: /docker-entrypoint-initdb.d/01-init-multiple-databases.sh
-              subPath: 01-init-multiple-databases.sh
+              mountPath: /docker-entrypoint-initdb.d
               readOnly: true
       volumes:
         - name: postgres-data

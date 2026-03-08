@@ -1,13 +1,10 @@
-name: platform-infra
+name: deploy
 
 on:
-  pull_request:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
 
 jobs:
-  validate:
+  deploy-local-dev:
     runs-on: [self-hosted, Linux, X64]
     env:
       KUBECONFIG: /home/victor/.kube/config
@@ -19,6 +16,9 @@ jobs:
         uses: azure/setup-kubectl@v4
         with:
           version: v1.32.0
+
+      - name: Preload local-dev images into Minikube
+        run: ./scripts/bootstrap-local-dev-images.sh
 
       - name: Debug Kubernetes access
         run: |
@@ -33,3 +33,6 @@ jobs:
 
       - name: Client-side manifest validation
         run: kubectl apply --dry-run=client -f rendered-local-dev.yaml
+
+      - name: Deploy shared platform infrastructure
+        run: kubectl apply -k k8s/overlays/local-dev

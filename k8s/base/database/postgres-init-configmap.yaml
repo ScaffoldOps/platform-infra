@@ -9,41 +9,35 @@ data:
 
     export PGPASSWORD="${POSTGRES_PASSWORD}"
 
+    # This script is used both during first-time init and on every container start.
+    # Wait for PostgreSQL to accept local TCP connections before reconciling roles/databases.
+    until pg_isready --host 127.0.0.1 --port 5432 --username "${POSTGRES_USER}" >/dev/null 2>&1; do
+      sleep 2
+    done
+
     psql -v ON_ERROR_STOP=1 \
+      --host 127.0.0.1 \
       --username "${POSTGRES_USER}" \
       --dbname "${POSTGRES_DB}" \
       -v keycloak_password="${POSTGRES_KEYCLOAK_PASSWORD}" \
       -v generator_api_password="${POSTGRES_GENERATOR_API_PASSWORD}" \
       -v generator_worker_password="${POSTGRES_GENERATOR_WORKER_PASSWORD}" \
       -v deployment_worker_password="${POSTGRES_DEPLOYMENT_WORKER_PASSWORD}" <<'SQL'
-    DO
-    $do$
-    BEGIN
-      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'keycloakuser') THEN
-        CREATE ROLE keycloakuser LOGIN PASSWORD :'keycloak_password';
-      ELSE
-        ALTER ROLE keycloakuser WITH LOGIN PASSWORD :'keycloak_password';
-      END IF;
+    SELECT format('CREATE ROLE keycloakuser LOGIN PASSWORD %L', :'keycloak_password')
+    WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'keycloakuser')\gexec
+    ALTER ROLE keycloakuser WITH LOGIN PASSWORD :'keycloak_password';
 
-      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'generatorapiuser') THEN
-        CREATE ROLE generatorapiuser LOGIN PASSWORD :'generator_api_password';
-      ELSE
-        ALTER ROLE generatorapiuser WITH LOGIN PASSWORD :'generator_api_password';
-      END IF;
+    SELECT format('CREATE ROLE generatorapiuser LOGIN PASSWORD %L', :'generator_api_password')
+    WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'generatorapiuser')\gexec
+    ALTER ROLE generatorapiuser WITH LOGIN PASSWORD :'generator_api_password';
 
-      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'generatorworkeruser') THEN
-        CREATE ROLE generatorworkeruser LOGIN PASSWORD :'generator_worker_password';
-      ELSE
-        ALTER ROLE generatorworkeruser WITH LOGIN PASSWORD :'generator_worker_password';
-      END IF;
+    SELECT format('CREATE ROLE generatorworkeruser LOGIN PASSWORD %L', :'generator_worker_password')
+    WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'generatorworkeruser')\gexec
+    ALTER ROLE generatorworkeruser WITH LOGIN PASSWORD :'generator_worker_password';
 
-      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'deploymentworkeruser') THEN
-        CREATE ROLE deploymentworkeruser LOGIN PASSWORD :'deployment_worker_password';
-      ELSE
-        ALTER ROLE deploymentworkeruser WITH LOGIN PASSWORD :'deployment_worker_password';
-      END IF;
-    END
-    $do$;
+    SELECT format('CREATE ROLE deploymentworkeruser LOGIN PASSWORD %L', :'deployment_worker_password')
+    WHERE NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'deploymentworkeruser')\gexec
+    ALTER ROLE deploymentworkeruser WITH LOGIN PASSWORD :'deployment_worker_password';
 
     SELECT 'CREATE DATABASE keycloakdb OWNER keycloakuser'
     WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloakdb')\gexec

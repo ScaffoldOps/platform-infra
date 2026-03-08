@@ -113,6 +113,6 @@ Shared PostgreSQL credentials are stored in `k8s/base/database/postgres-secret.y
 - Energyco-specific namespace manifests have been removed from the active platform-infra kustomization path.
 - A single local-dev PostgreSQL instance is used in namespace `scaffoldops`.
 - A single local-dev Keycloak instance is used in namespace `security`.
-- Keycloak runs in dev mode with the container image `quay.io/keycloak/keycloak:latest`.
+- Keycloak runs in dev mode with the container image `quay.io/keycloak/keycloak:26.4.7`.
 - PostgreSQL runs from `postgres:16` with one PVC and initializes logical databases only on first startup.
 - No production HA, ingress, or external PostgreSQL is configured here.
