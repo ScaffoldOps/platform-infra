@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-scripts
+data:
+  01-init-multiple-databases.sh: |
+    #!/bin/bash
+    set -euo pipefail
+
+    export PGPASSWORD="${POSTGRES_PASSWORD}"
+
+    psql -v ON_ERROR_STOP=1 \
+      --username "${POSTGRES_USER}" \
+      --dbname "${POSTGRES_DB}" \
+      -v keycloak_password="${POSTGRES_KEYCLOAK_PASSWORD}" \
+      -v generator_api_password="${POSTGRES_GENERATOR_API_PASSWORD}" \
+      -v generator_worker_password="${POSTGRES_GENERATOR_WORKER_PASSWORD}" \
+      -v deployment_worker_password="${POSTGRES_DEPLOYMENT_WORKER_PASSWORD}" <<'SQL'
+    DO
+    $do$
+    BEGIN
+      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'keycloakuser') THEN
+        CREATE ROLE keycloakuser LOGIN PASSWORD :'keycloak_password';
+      ELSE
+        ALTER ROLE keycloakuser WITH LOGIN PASSWORD :'keycloak_password';
+      END IF;
+
+      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'generatorapiuser') THEN
+        CREATE ROLE generatorapiuser LOGIN PASSWORD :'generator_api_password';
+      ELSE
+        ALTER ROLE generatorapiuser WITH LOGIN PASSWORD :'generator_api_password';
+      END IF;
+
+      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'generatorworkeruser') THEN
+        CREATE ROLE generatorworkeruser LOGIN PASSWORD :'generator_worker_password';
+      ELSE
+        ALTER ROLE generatorworkeruser WITH LOGIN PASSWORD :'generator_worker_password';
+      END IF;
+
+      IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'deploymentworkeruser') THEN
+        CREATE ROLE deploymentworkeruser LOGIN PASSWORD :'deployment_worker_password';
+      ELSE
+        ALTER ROLE deploymentworkeruser WITH LOGIN PASSWORD :'deployment_worker_password';
+      END IF;
+    END
+    $do$;
+
+    SELECT 'CREATE DATABASE keycloakdb OWNER keycloakuser'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloakdb')\gexec
+    ALTER DATABASE keycloakdb OWNER TO keycloakuser;
+    GRANT ALL PRIVILEGES ON DATABASE keycloakdb TO keycloakuser;
+
+    SELECT 'CREATE DATABASE generatorapidb OWNER generatorapiuser'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'generatorapidb')\gexec
+    ALTER DATABASE generatorapidb OWNER TO generatorapiuser;
+    GRANT ALL PRIVILEGES ON DATABASE generatorapidb TO generatorapiuser;
+
+    SELECT 'CREATE DATABASE generatorworkerdb OWNER generatorworkeruser'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'generatorworkerdb')\gexec
+    ALTER DATABASE generatorworkerdb OWNER TO generatorworkeruser;
+    GRANT ALL PRIVILEGES ON DATABASE generatorworkerdb TO generatorworkeruser;
+
+    SELECT 'CREATE DATABASE deploymentworkerdb OWNER deploymentworkeruser'
+    WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'deploymentworkerdb')\gexec
+    ALTER DATABASE deploymentworkerdb OWNER TO deploymentworkeruser;
+    GRANT ALL PRIVILEGES ON DATABASE deploymentworkerdb TO deploymentworkeruser;
+    SQL
