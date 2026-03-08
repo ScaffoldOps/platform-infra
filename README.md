@@ -33,7 +33,16 @@ k8s/
 
 ## Deploy
 
-Apply the local-dev overlay:
+Preload the local-dev container images into Minikube, then apply the overlay:
+
+```bash
+./scripts/bootstrap-local-dev-images.sh
+kubectl apply -k k8s/overlays/local-dev
+```
+
+If the images already exist in the Minikube node cache, the preload step is harmless. This avoids startup failures when the local cluster cannot reach Docker Hub or Quay during pod creation.
+
+Apply only the local-dev overlay if image availability is already handled:
 
 ```bash
 kubectl apply -k k8s/overlays/local-dev
