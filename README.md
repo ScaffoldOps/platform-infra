@@ -70,6 +70,7 @@ The current intended local-dev architecture is:
 - `scaffoldops` namespace:
   - shared PostgreSQL Deployment
   - PostgreSQL Service
+  - PostgreSQL NodePort Service for local external access
   - PostgreSQL PVC
   - PostgreSQL credentials secret
   - PostgreSQL bootstrap ConfigMap
@@ -122,6 +123,7 @@ Directory purpose:
 
 - `k8s/overlays/local-dev`
   - local Minikube overlay that points to the shared base
+  - adds local-only PostgreSQL external access through a `NodePort` Service
 
 - `scripts/bootstrap-local-dev-images.sh`
   - helper script to preload required images into Minikube before deploy
@@ -143,6 +145,11 @@ Render the full local-dev manifest with:
 ```bash
 kubectl kustomize k8s/overlays/local-dev
 ```
+
+The local-dev overlay keeps the in-cluster PostgreSQL `ClusterIP` Service at
+`postgres.scaffoldops.svc.cluster.local:5432` and adds a second Service named
+`postgres-external` exposed as `NodePort` `30432` for local tools running
+outside Kubernetes.
 
 ## Deployment Model
 
@@ -231,6 +238,12 @@ Then open:
 
 ```text
 http://localhost:8080
+```
+
+Get the Minikube IP for external PostgreSQL access:
+
+```bash
+minikube ip
 ```
 
 ## PostgreSQL
