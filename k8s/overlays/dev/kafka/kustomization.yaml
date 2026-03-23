@@ -1,7 +1,7 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
+namespace: scaffoldops-dev
+
 resources:
-  - security.yaml
-  - scaffoldops.yaml
-  - scaffoldops-dev.yaml
+  - ../../../base/kafka
