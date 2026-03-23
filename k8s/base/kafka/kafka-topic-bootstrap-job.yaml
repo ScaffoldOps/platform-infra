@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-topic-bootstrap
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 6
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-topic-bootstrap
+          image: confluentinc/cp-kafka:7.7.7
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              until kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do
+                echo "Waiting for Kafka at kafka:9092"
+                sleep 5
+              done
+
+              kafka-topics \
+                --bootstrap-server kafka:9092 \
+                --create \
+                --if-not-exists \
+                --topic generation-requested \
+                --partitions 1 \
+                --replication-factor 1
