@@ -9,7 +9,7 @@ This repository currently owns the shared platform infrastructure that is visibl
 - bootstrap namespaces used by the ScaffoldOps platform
 - shared PostgreSQL for platform services in the `scaffoldops` namespace
 - Keycloak in the `security` namespace
-- Kafka and topic bootstrap manifests in the `scaffoldops-dev` namespace
+- Kafka, Kafka UI, and topic bootstrap manifests in the `scaffoldops-dev` namespace
 
 This repository does not define product-specific application namespaces or workloads. Application repositories consume the shared infrastructure managed here.
 
@@ -29,11 +29,11 @@ k8s/
 ```
 
 - `k8s/base/database`: shared PostgreSQL instance, PVC, service, secret, and init scripts
-- `k8s/base/kafka`: single-node Kafka deployment, service, PVC, and topic bootstrap job
+- `k8s/base/kafka`: single-node Kafka deployment, Kafka UI, service manifests, PVC, and topic bootstrap job
 - `k8s/base/namespaces`: namespace bootstrap manifests
 - `k8s/base/security`: shared security infrastructure for local dev
-- `k8s/overlays/local-dev`: local Minikube entrypoint for namespaces, PostgreSQL, Keycloak, and Kafka
-- `k8s/overlays/dev`: dev entrypoint for namespaces, Kafka, and topic bootstrap
+- `k8s/overlays/local-dev`: local Minikube entrypoint for namespaces, PostgreSQL, Keycloak, Kafka, and Kafka UI
+- `k8s/overlays/dev`: dev entrypoint for namespaces, Kafka, Kafka UI, and topic bootstrap
 
 ## Deploy
 
@@ -88,6 +88,12 @@ Expected dev Kafka service DNS:
 kafka.scaffoldops-dev.svc.cluster.local:9092
 ```
 
+Expected dev Kafka UI service DNS:
+
+```text
+kafka-ui.scaffoldops-dev.svc.cluster.local:8080
+```
+
 Expected Kafka topic ensured by platform-infra:
 
 ```text
@@ -126,15 +132,32 @@ Kafka is included in the active base render path, so `k8s/overlays/local-dev` an
 
 The topic bootstrap job creates `generation-requested` against `kafka:9092` with `--if-not-exists`, `partitions=1`, and `replication-factor=1`. The job is intentionally infra-owned so application deployments do not depend on manual topic creation.
 
+Kafka UI runs in `scaffoldops-dev` for local and dev inspection. Use it to browse brokers, topics, consumer groups, inspect messages, and publish test messages manually to topics such as `generation-requested`.
+
+## Port Forward Kafka UI
+
+Forward Kafka UI to your workstation:
+
+```bash
+kubectl -n scaffoldops-dev port-forward svc/kafka-ui 8080:8080
+```
+
+Then open:
+
+```text
+http://localhost:8080
+```
+
 ## Assumptions
 
 - `kubectl` points to the target cluster before applying an overlay.
 - The active platform namespaces managed here are `security`, `scaffoldops`, and `scaffoldops-dev`.
-- `k8s/overlays/local-dev` deploys namespaces, PostgreSQL, Keycloak, Kafka, and the Kafka topic bootstrap job.
-- `k8s/overlays/dev` deploys namespaces, Kafka, and the Kafka topic bootstrap job.
+- `k8s/overlays/local-dev` deploys namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, and the Kafka topic bootstrap job.
+- `k8s/overlays/dev` deploys namespaces, Kafka, Kafka UI, and the Kafka topic bootstrap job.
 - PostgreSQL runs from `postgres:16` with one PVC in `scaffoldops`.
 - The PostgreSQL init script is mounted from a ConfigMap and runs through `/docker-entrypoint-initdb.d`.
 - Keycloak runs in dev mode with the container image `quay.io/keycloak/keycloak:latest` in `security`.
 - Kafka runs as a single-node KRaft broker from `confluentinc/cp-kafka:7.7.7` in `scaffoldops-dev`.
+- Kafka UI runs from `provectuslabs/kafka-ui:v0.7.2` in `scaffoldops-dev` and connects to `kafka:9092`.
 - The `generation-requested` topic is bootstrap-created by a Kubernetes Job in `scaffoldops-dev`.
 - No ingress, HA topology, or external managed services are configured in this repository.

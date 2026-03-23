@@ -7,4 +7,6 @@ resources:
   - kafka-pvc.yaml
   - kafka-deployment.yaml
   - kafka-service.yaml
+  - kafka-ui-deployment.yaml
+  - kafka-ui-service.yaml
   - kafka-topic-bootstrap-job.yaml
