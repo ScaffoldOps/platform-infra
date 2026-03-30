@@ -4,7 +4,11 @@ kind: Kustomization
 namespace: security
 
 resources:
-  - keycloak-admin-secret.yaml
-  - keycloak-db-secret.yaml
-  - keycloak-deployment.yaml
-  - keycloak-service.yaml
+  - keycloak-dev-admin-secret.yaml
+  - keycloak-dev-db-secret.yaml
+  - keycloak-dev-deployment.yaml
+  - keycloak-dev-service.yaml
+  - keycloak-pre-admin-secret.yaml
+  - keycloak-pre-db-secret.yaml
+  - keycloak-pre-deployment.yaml
+  - keycloak-pre-service.yaml
