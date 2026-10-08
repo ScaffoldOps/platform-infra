@@ -7,6 +7,20 @@ on:
       - main
       - develop
   workflow_dispatch:
+    inputs:
+      overlay:
+        description: Infrastructure overlay to deploy
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - local-dev
+      runBootstrapJobs:
+        description: Rerun MinIO bucket and Kafka topic bootstrap jobs
+        type: boolean
+        default: true
+
 
 jobs:
   validate:
@@ -41,7 +55,7 @@ jobs:
           kubectl apply --dry-run=client -f rendered-local-dev.yaml
           kubectl apply --dry-run=client -f rendered-dev.yaml
 
-  deploy-local-dev:
+  deploy-selected-overlay:
     if: github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: [self-hosted, Linux, X64]
@@ -64,5 +78,58 @@ jobs:
           kubectl config current-context
           kubectl cluster-info
 
-      - name: Deploy shared platform infrastructure
-        run: kubectl apply -k k8s/overlays/local-dev
+      - name: Validate selected overlay
+        env:
+          OVERLAY: ${{ inputs.overlay }}
+        run: |
+          case "$OVERLAY" in
+            dev|local-dev) ;;
+            *) echo "Unsupported overlay: $OVERLAY" >&2; exit 1 ;;
+          esac
+
+      - name: Reset bootstrap jobs
+        if: inputs.runBootstrapJobs == true
+        run: |
+          kubectl -n scaffoldops-dev delete job minio-create-bucket kafka-topic-bootstrap --ignore-not-found --wait=true --timeout=120s
+
+      - name: Deploy selected infrastructure overlay
+        env:
+          OVERLAY: ${{ inputs.overlay }}
+        run: kubectl apply -k "k8s/overlays/$OVERLAY"
+
+      - name: Check deployment rollouts
+        env:
+          OVERLAY: ${{ inputs.overlay }}
+        run: |
+          check_rollout() {
+            namespace="$1"
+            deployment="$2"
+            resource=$(kubectl -n "$namespace" get deployment "$deployment" --ignore-not-found -o name)
+            if [ -z "$resource" ]; then
+              echo "Skipping $namespace/$deployment: deployment is absent"
+            else
+              echo "Waiting for $namespace/$deployment"
+              kubectl -n "$namespace" rollout status "deployment/$deployment" --timeout=300s
+            fi
+          }
+
+          check_rollout scaffoldops-dev postgres
+          check_rollout scaffoldops-dev kafka
+          check_rollout scaffoldops-dev kafka-ui
+          check_rollout scaffoldops-dev minio
+          if [ "$OVERLAY" = local-dev ]; then
+            check_rollout scaffoldops postgres
+            check_rollout security keycloak-dev
+          else
+            echo "Skipping shared PostgreSQL and Keycloak: not managed by the dev overlay"
+          fi
+
+      - name: Wait for MinIO bucket bootstrap
+        if: inputs.runBootstrapJobs == true
+        run: |
+          resource=$(kubectl -n scaffoldops-dev get job minio-create-bucket --ignore-not-found -o name)
+          if [ -z "$resource" ]; then
+            echo "MinIO bootstrap Job is absent; it may already have completed and been TTL-cleaned"
+          else
+            kubectl -n scaffoldops-dev wait --for=condition=complete job/minio-create-bucket --timeout=600s
+          fi

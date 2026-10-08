@@ -77,8 +77,30 @@ rendered manifest. Both overlays include MinIO and its bucket bootstrap Job.
 The existing self-hosted runner uses `/home/victor/.kube/config`; its
 Kubernetes access check and client dry-run need API discovery/schema access.
 
-`deploy-local-dev` stays restricted to `workflow_dispatch` and runs only after
-validation succeeds. Pushes and pull requests validate without deploying.
+Pushes and pull requests validate only. Actual deployment is a deliberate
+manual action: open **GitHub Actions > platform-infra > Run workflow**, choose
+the branch and `overlay` (`dev`, the default, or `local-dev`), then run it.
+`deploy-selected-overlay` runs only on `workflow_dispatch` after validation
+succeeds and applies the selected overlay on the existing Minikube runner.
+
+Use `dev` to restore Kafka, Kafka UI, MinIO, and dev PostgreSQL aliases; it
+requires the shared PostgreSQL instance to exist. Use `local-dev` to restore
+the full shared infrastructure, including PostgreSQL and Keycloak. Applying
+recreates missing Deployments, Services, ConfigMaps, Secrets, and other
+resources declared in that overlay.
+
+`runBootstrapJobs` defaults to true. It deletes only `minio-create-bucket` and
+`kafka-topic-bootstrap` Jobs in `scaffoldops-dev`, with `--ignore-not-found`,
+before applying so bucket and topic initialization can rerun safely. With
+false, existing Jobs are retained; missing Jobs are still created by apply.
+The workflow waits for present deployments and, when requested, the MinIO
+bootstrap Job. Deployments absent from the selected overlay are skipped;
+rollout failures for present deployments fail the run.
+
+The workflow does not delete namespaces, PVCs, Deployments, or persisted
+MinIO, PostgreSQL, or Kafka data. Existing PVCs are reused. If a PVC or its
+underlying storage was deleted separately, applying can recreate resources
+but cannot recover lost data.
 
 ## Verify
 
