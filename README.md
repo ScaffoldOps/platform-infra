@@ -67,6 +67,19 @@ kubectl kustomize k8s/overlays/local-dev
 kubectl kustomize k8s/overlays/dev
 ```
 
+## GitHub Actions
+
+`.github/workflows/platform-infra.yml` validates pushes to `main` and
+`develop`, pull requests, and manual `workflow_dispatch` runs. Validation
+renders both `k8s/overlays/local-dev` and `k8s/overlays/dev` with
+`kubectl kustomize`, then runs `kubectl apply --dry-run=client` on each
+rendered manifest. Both overlays include MinIO and its bucket bootstrap Job.
+The existing self-hosted runner uses `/home/victor/.kube/config`; its
+Kubernetes access check and client dry-run need API discovery/schema access.
+
+`deploy-local-dev` stays restricted to `workflow_dispatch` and runs only after
+validation succeeds. Pushes and pull requests validate without deploying.
+
 ## Verify
 
 Check that the expected namespaces, PostgreSQL resources, and Keycloak resources exist:
@@ -175,8 +188,16 @@ The current sibling `generator-worker` checkout instead binds
 the same values until it supports `GENERATOR_ARTIFACT_MINIO_ENDPOINT` and
 `GENERATOR_ARTIFACT_MINIO_BUCKET`. Its credential variables are
 `GENERATOR_MINIO_ACCESS_KEY` and `GENERATOR_MINIO_SECRET_KEY`, as shown above.
-Its existing deployment references `generator-worker-minio`; consuming
-`minio-credentials` requires updating those references in the worker repository.
+`minio-credentials` is the canonical infrastructure Secret. Both overlays also
+provide a compatibility Secret named `generator-worker-minio` in
+`scaffoldops-dev`, matching the current worker deployment's `access-key` and
+`secret-key` references. Kustomize copies these values from `MINIO_ROOT_USER`
+and `MINIO_ROOT_PASSWORD` in the canonical Secret when rendering; this is a
+separate Secret, not a live Kubernetes alias. Edit the canonical manifest and
+reapply the overlay to keep both synchronized. Apply the overlay before
+rolling out the worker to resolve its missing-Secret error. The worker should
+eventually reference `minio-credentials` directly using its canonical keys,
+as in the example above.
 No worker manifests are changed here.
 
 The Secret and worker must be in the same namespace for these references.

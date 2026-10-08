@@ -5,7 +5,31 @@ namespace: scaffoldops-dev
 
 resources:
   - minio-credentials-secret.yaml
+  - generator-worker-minio-secret.yaml
   - minio-pvc.yaml
   - minio-deployment.yaml
   - minio-service.yaml
   - minio-create-bucket-job.yaml
+
+# Keep the worker compatibility Secret synchronized with canonical credentials.
+replacements:
+  - source:
+      kind: Secret
+      name: minio-credentials
+      fieldPath: stringData.MINIO_ROOT_USER
+    targets:
+      - select:
+          kind: Secret
+          name: generator-worker-minio
+        fieldPaths:
+          - stringData.access-key
+  - source:
+      kind: Secret
+      name: minio-credentials
+      fieldPath: stringData.MINIO_ROOT_PASSWORD
+    targets:
+      - select:
+          kind: Secret
+          name: generator-worker-minio
+        fieldPaths:
+          - stringData.secret-key
