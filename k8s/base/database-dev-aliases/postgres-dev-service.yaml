@@ -3,8 +3,10 @@ kind: Service
 metadata:
   name: postgres-dev
 spec:
-  type: ExternalName
-  externalName: postgres.scaffoldops.svc.cluster.local
+  type: ClusterIP
+  selector:
+    app: postgres
   ports:
     - name: postgres
       port: 5432
+      targetPort: 5432

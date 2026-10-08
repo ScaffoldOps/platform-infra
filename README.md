@@ -38,7 +38,7 @@ k8s/
 ```
 
 - `k8s/base/database`: shared PostgreSQL instance, PVC, service, secret, and init scripts
-- `k8s/base/database-dev-aliases`: dev PostgreSQL DNS names pointing to the existing shared instance
+- `k8s/base/database-dev-aliases`: dev PostgreSQL Services selecting the PostgreSQL workload in `scaffoldops-dev`
 - `k8s/base/minio`: local/dev MinIO, data PVC, credentials, and bucket bootstrap job
 - `k8s/base/kafka`: single-node Kafka deployment, Kafka UI, service manifests, PVC, and topic bootstrap job
 - `k8s/base/namespaces`: namespace bootstrap manifests
@@ -79,9 +79,9 @@ Choose the branch (for example `develop`) with GitHub's **Use workflow from**
 selector, then select the `environment` input:
 
 - `dev` (default) applies `k8s/overlays/dev`, restoring namespaces, shared
-  PostgreSQL, dev PostgreSQL aliases, Kafka, Kafka UI, Keycloak, MinIO, and
-  bootstrap Jobs. PostgreSQL remains in `scaffoldops` with its existing PVC;
-  DEV Keycloak runs in `security`. PRE Keycloak is kept scaled to zero.
+  platform resources, dev PostgreSQL Services, Kafka, Kafka UI, Keycloak,
+  MinIO, and bootstrap Jobs. DEV Keycloak runs in `security`; PRE Keycloak is
+  kept scaled to zero.
 - `pre` maps exclusively to `k8s/overlays/pre`. That overlay is not implemented
   yet: only partial PRE Keycloak resources exist. Selecting PRE fails clearly
   before any cluster changes; it never falls back to DEV.
@@ -137,13 +137,24 @@ Expected local-dev PostgreSQL service DNS:
 postgres.scaffoldops.svc.cluster.local:5432
 ```
 
-PostgreSQL stays in `scaffoldops` with its existing Deployment, `postgres`
-Service, and `postgres-data` PVC unchanged. In `scaffoldops-dev`, the preferred
-name is `postgres-dev:5432`; `postgres:5432` is a compatibility alias for
-existing consumers, including Keycloak's configured dev database hostname.
-Both are ExternalName Services pointing to
-`postgres.scaffoldops.svc.cluster.local`. They share the existing data and do
-not provision another database or move storage. The `dev` overlay includes that shared database without moving its storage.
+Development uses the PostgreSQL workload and `postgres-data` PVC in
+`scaffoldops-dev`. Both `postgres:5432` and `postgres-dev:5432` Services in
+that namespace select its `app=postgres` pods. `keycloak-dev` connects to
+`postgres.scaffoldops-dev.svc.cluster.local`, database `keycloakdb`, with the
+`keycloak-dev-db` Secret. Do not point dev Keycloak at
+`postgres.scaffoldops.svc.cluster.local`: that is the separate shared
+PostgreSQL instance and contains different realm state. The `scaffoldops`
+PostgreSQL Deployment and PVC remain unchanged.
+
+The active dev realm is `scaffoldops-dev`, matching generator-api JWKS
+validation and generator-worker token requests. PRE Keycloak is configured for
+`postgres.scaffoldops-pre.svc.cluster.local` and database `keycloakdb`, with
+PRE-specific credentials; a complete PRE overlay is not yet implemented.
+Local/dev Keycloak admin credentials are `admin` / `admin123` from
+`keycloak-dev-admin`. Keycloak bootstrap admin environment settings only
+create the account when the master realm is first initialized. If an existing
+database has incompatible or stale Keycloak state, investigate and back up
+that data before any manual reset. Do not delete PVCs as part of deployment.
 
 Expected dev Kafka service DNS:
 
@@ -299,7 +310,7 @@ Default local-dev admin credentials are stored in `k8s/base/security/keycloak-de
 - username: `admin`
 - password: `admin`
 
-Keycloak's database password is stored separately in `k8s/base/security/keycloak-dev-db-secret.yaml` because the Keycloak pod runs in the `security` namespace while PostgreSQL runs in `scaffoldops`, and Kubernetes secrets are namespace-scoped.
+Keycloak's database password is stored separately in `k8s/base/security/keycloak-dev-db-secret.yaml` because the Keycloak pod runs in the `security` namespace while dev PostgreSQL runs in `scaffoldops-dev`, and Kubernetes secrets are namespace-scoped.
 
 Shared PostgreSQL credentials are stored in `k8s/base/database/postgres-secret.yaml`. The bootstrap script creates one logical database per service inside the same PostgreSQL instance:
 
