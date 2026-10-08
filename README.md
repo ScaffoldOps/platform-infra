@@ -44,7 +44,7 @@ k8s/
 - `k8s/base/namespaces`: namespace bootstrap manifests
 - `k8s/base/security`: shared security infrastructure for local dev
 - `k8s/overlays/local-dev`: local Minikube entrypoint for namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, and MinIO
-- `k8s/overlays/dev`: dev entrypoint for namespaces, Kafka, Kafka UI, MinIO, bootstrap jobs, and PostgreSQL aliases; requires the shared PostgreSQL instance provisioned by local-dev
+- `k8s/overlays/dev`: complete DEV entrypoint for the shared base infrastructure; PRE Keycloak is scaled to zero
 
 ## Deploy
 
@@ -69,38 +69,39 @@ kubectl kustomize k8s/overlays/dev
 
 ## GitHub Actions
 
-`.github/workflows/platform-infra.yml` validates pushes to `main` and
-`develop`, pull requests, and manual `workflow_dispatch` runs. Validation
-renders both `k8s/overlays/local-dev` and `k8s/overlays/dev` with
-`kubectl kustomize`, then runs `kubectl apply --dry-run=client` on each
-rendered manifest. Both overlays include MinIO and its bucket bootstrap Job.
-The existing self-hosted runner uses `/home/victor/.kube/config`; its
-Kubernetes access check and client dry-run need API discovery/schema access.
+**platform-infra** is validation only. Pushes to `main` and `develop` and pull
+requests render and client-dry-run both `local-dev` and `dev`. It has no deploy
+job. The self-hosted runner uses `/home/victor/.kube/config`; API discovery and
+schema access are needed for client dry-runs.
 
-Pushes and pull requests validate only. Actual deployment is a deliberate
-manual action: open **GitHub Actions > platform-infra > Run workflow**, choose
-the branch and `overlay` (`dev`, the default, or `local-dev`), then run it.
-`deploy-selected-overlay` runs only on `workflow_dispatch` after validation
-succeeds and applies the selected overlay on the existing Minikube runner.
+To restore infrastructure, open **GitHub Actions > deploy > Run workflow**.
+Choose the branch (for example `develop`) with GitHub's **Use workflow from**
+selector, then select the `environment` input:
 
-Use `dev` to restore Kafka, Kafka UI, MinIO, and dev PostgreSQL aliases; it
-requires the shared PostgreSQL instance to exist. Use `local-dev` to restore
-the full shared infrastructure, including PostgreSQL and Keycloak. Applying
-recreates missing Deployments, Services, ConfigMaps, Secrets, and other
-resources declared in that overlay.
+- `dev` (default) applies `k8s/overlays/dev`, restoring namespaces, shared
+  PostgreSQL, dev PostgreSQL aliases, Kafka, Kafka UI, Keycloak, MinIO, and
+  bootstrap Jobs. PostgreSQL remains in `scaffoldops` with its existing PVC;
+  DEV Keycloak runs in `security`. PRE Keycloak is kept scaled to zero.
+- `pre` maps exclusively to `k8s/overlays/pre`. That overlay is not implemented
+  yet: only partial PRE Keycloak resources exist. Selecting PRE fails clearly
+  before any cluster changes; it never falls back to DEV.
+
+The separate `deploy.yml` workflow runs only on `workflow_dispatch`. It
+validates the selected overlay before applying and serializes manual deploys
+on the Minikube runner. Pushes and PRs never deploy.
 
 `runBootstrapJobs` defaults to true. It deletes only `minio-create-bucket` and
-`kafka-topic-bootstrap` Jobs in `scaffoldops-dev`, with `--ignore-not-found`,
-before applying so bucket and topic initialization can rerun safely. With
-false, existing Jobs are retained; missing Jobs are still created by apply.
-The workflow waits for present deployments and, when requested, the MinIO
-bootstrap Job. Deployments absent from the selected overlay are skipped;
-rollout failures for present deployments fail the run.
+`kafka-topic-bootstrap` Jobs in the selected `scaffoldops-dev` or
+`scaffoldops-pre` namespace, using `--ignore-not-found`, then reapplies the
+overlay. Both jobs initialize resources idempotently. With false, existing
+Jobs are retained; missing Jobs are still created by apply. The workflow
+waits for both Jobs when requested and checks present deployments; rollout
+failures are reported instead of ignored.
 
-The workflow does not delete namespaces, PVCs, Deployments, or persisted
-MinIO, PostgreSQL, or Kafka data. Existing PVCs are reused. If a PVC or its
-underlying storage was deleted separately, applying can recreate resources
-but cannot recover lost data.
+Applying restores missing Deployments, Services, ConfigMaps, Secrets, and
+other declared resources. The workflow does not delete namespaces, PVCs, or
+persisted MinIO, PostgreSQL, or Kafka data. Existing PVCs are reused. If storage
+was deleted separately, applying cannot recover lost data.
 
 ## Verify
 
@@ -142,8 +143,7 @@ name is `postgres-dev:5432`; `postgres:5432` is a compatibility alias for
 existing consumers, including Keycloak's configured dev database hostname.
 Both are ExternalName Services pointing to
 `postgres.scaffoldops.svc.cluster.local`. They share the existing data and do
-not provision another database or move storage. The `dev` overlay alone
-requires that shared database to already exist.
+not provision another database or move storage. The `dev` overlay includes that shared database without moving its storage.
 
 Expected dev Kafka service DNS:
 
@@ -327,7 +327,7 @@ http://localhost:8080
 - `kubectl` points to the target cluster before applying an overlay.
 - The active platform namespaces managed here are `security`, `scaffoldops`, and `scaffoldops-dev`.
 - `k8s/overlays/local-dev` deploys namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, MinIO, PostgreSQL aliases, and both bootstrap jobs.
-- `k8s/overlays/dev` deploys namespaces, Kafka, Kafka UI, MinIO, PostgreSQL aliases, and both bootstrap jobs; it consumes the existing shared PostgreSQL instance.
+- `k8s/overlays/dev` deploys the full shared base infrastructure and scales PRE Keycloak to zero.
 - PostgreSQL runs from `postgres:16` with one PVC in `scaffoldops`.
 - The PostgreSQL init script is mounted from a ConfigMap and runs through `/docker-entrypoint-initdb.d`.
 - Keycloak runs in dev mode with the container image `quay.io/keycloak/keycloak:latest` in `security`.

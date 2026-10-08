@@ -1,0 +1,113 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - pre
+      runBootstrapJobs:
+        description: Recreate bootstrap jobs before applying infrastructure
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-infra-minikube-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-selected-environment:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, Linux, X64]
+    env:
+      KUBECONFIG: /home/victor/.kube/config
+      TARGET_ENVIRONMENT: ${{ inputs.environment }}
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+
+      - name: Select and check overlay
+        run: |
+          case "$TARGET_ENVIRONMENT" in
+            dev|pre) ;;
+            *) echo "Unsupported environment: $TARGET_ENVIRONMENT" >&2; exit 1 ;;
+          esac
+          overlay="k8s/overlays/$TARGET_ENVIRONMENT"
+          if [ ! -d "$overlay" ]; then
+            echo "::error::The $TARGET_ENVIRONMENT overlay ($overlay) is not implemented on the selected branch. Implement it before deploying this environment. No infrastructure has been changed."
+            exit 1
+          fi
+          echo "OVERLAY=$overlay" >> "$GITHUB_ENV"
+          echo "APP_NAMESPACE=scaffoldops-$TARGET_ENVIRONMENT" >> "$GITHUB_ENV"
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: v1.32.0
+
+      - name: Check Kubernetes access
+        run: |
+          kubectl config current-context
+          kubectl cluster-info
+
+      - name: Validate selected overlay before deployment
+        run: |
+          kubectl kustomize "$OVERLAY" > rendered-selected.yaml
+          kubectl apply --dry-run=client -f rendered-selected.yaml
+
+      - name: Recreate bootstrap jobs
+        if: inputs.runBootstrapJobs == true
+        run: |
+          namespace=$(kubectl get namespace "$APP_NAMESPACE" --ignore-not-found -o name)
+          if [ -z "$namespace" ]; then
+            echo "Namespace $APP_NAMESPACE is absent; apply will create it and the bootstrap jobs"
+          else
+            kubectl -n "$APP_NAMESPACE" delete job minio-create-bucket kafka-topic-bootstrap --ignore-not-found --wait=true --timeout=120s
+          fi
+
+      - name: Apply selected infrastructure
+        run: kubectl apply -k "$OVERLAY"
+
+      - name: Wait for bootstrap jobs
+        if: inputs.runBootstrapJobs == true
+        run: |
+          for job in minio-create-bucket kafka-topic-bootstrap; do
+            resource=$(kubectl -n "$APP_NAMESPACE" get job "$job" --ignore-not-found -o name)
+            if [ -z "$resource" ]; then
+              echo "Skipping $APP_NAMESPACE/$job: absent or already TTL-cleaned after completion"
+            else
+              echo "Waiting for $APP_NAMESPACE/$job"
+              kubectl -n "$APP_NAMESPACE" wait --for=condition=complete "job/$job" --timeout=600s
+            fi
+          done
+
+      - name: Check deployment rollouts
+        run: |
+          check_rollout() {
+            namespace="$1"
+            deployment="$2"
+            resource=$(kubectl -n "$namespace" get deployment "$deployment" --ignore-not-found -o name)
+            if [ -z "$resource" ]; then
+              echo "Skipping $namespace/$deployment: deployment is absent"
+            else
+              echo "Waiting for $namespace/$deployment"
+              kubectl -n "$namespace" rollout status "deployment/$deployment" --timeout=300s
+            fi
+          }
+          for deployment in postgres kafka kafka-ui minio; do
+            check_rollout "$APP_NAMESPACE" "$deployment"
+          done
+          # DEV preserves the existing shared PostgreSQL namespace and PVC.
+          if [ "$TARGET_ENVIRONMENT" = dev ]; then
+            check_rollout scaffoldops postgres
+          fi
+          check_rollout security "keycloak-$TARGET_ENVIRONMENT"
