@@ -10,13 +10,15 @@ This repository currently owns the shared platform infrastructure that is visibl
 - shared PostgreSQL for platform services in the `scaffoldops` namespace
 - Keycloak in the `security` namespace
 - Kafka, Kafka UI, and topic bootstrap manifests in the `scaffoldops-dev` namespace
+- MinIO Artifact Store, bucket bootstrap, and PostgreSQL DNS aliases in `scaffoldops-dev`
 
 This repository does not define product-specific application namespaces or workloads. Application repositories consume the shared infrastructure managed here.
 
-Application-owned storage is also defined outside this repository. For example,
-`generator-worker` owns `generator-worker-artifacts-pvc` in its own
-`k8s/deployment` manifests and mounts it at `/var/lib/generator-worker` for MVP
-artifact persistence.
+Generated artifacts can use the shared MinIO Artifact Store. Filesystem storage
+and its PVC remain application-owned when that backend is selected. PostgreSQL
+stores ScaffoldOps request metadata, including artifactRef, imageRef,
+deploymentStatus, and deploymentNamespace. Generated container images belong
+in Docker Registry; MinIO stores artifacts, not Docker images.
 
 ## Structure
 
@@ -25,6 +27,8 @@ k8s/
   base/
     kustomization.yaml
     database/
+    database-dev-aliases/
+    minio/
     kafka/
     namespaces/
     security/
@@ -34,11 +38,13 @@ k8s/
 ```
 
 - `k8s/base/database`: shared PostgreSQL instance, PVC, service, secret, and init scripts
+- `k8s/base/database-dev-aliases`: dev PostgreSQL DNS names pointing to the existing shared instance
+- `k8s/base/minio`: local/dev MinIO, data PVC, credentials, and bucket bootstrap job
 - `k8s/base/kafka`: single-node Kafka deployment, Kafka UI, service manifests, PVC, and topic bootstrap job
 - `k8s/base/namespaces`: namespace bootstrap manifests
 - `k8s/base/security`: shared security infrastructure for local dev
-- `k8s/overlays/local-dev`: local Minikube entrypoint for namespaces, PostgreSQL, Keycloak, Kafka, and Kafka UI
-- `k8s/overlays/dev`: dev entrypoint for namespaces, Kafka, Kafka UI, and topic bootstrap
+- `k8s/overlays/local-dev`: local Minikube entrypoint for namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, and MinIO
+- `k8s/overlays/dev`: dev entrypoint for namespaces, Kafka, Kafka UI, MinIO, bootstrap jobs, and PostgreSQL aliases; requires the shared PostgreSQL instance provisioned by local-dev
 
 ## Deploy
 
@@ -95,6 +101,15 @@ Expected local-dev PostgreSQL service DNS:
 postgres.scaffoldops.svc.cluster.local:5432
 ```
 
+PostgreSQL stays in `scaffoldops` with its existing Deployment, `postgres`
+Service, and `postgres-data` PVC unchanged. In `scaffoldops-dev`, the preferred
+name is `postgres-dev:5432`; `postgres:5432` is a compatibility alias for
+existing consumers, including Keycloak's configured dev database hostname.
+Both are ExternalName Services pointing to
+`postgres.scaffoldops.svc.cluster.local`. They share the existing data and do
+not provision another database or move storage. The `dev` overlay alone
+requires that shared database to already exist.
+
 Expected dev Kafka service DNS:
 
 ```text
@@ -114,11 +129,101 @@ generation-requested
 artifact-cleanup-requested
 ```
 
-Generated project artifacts are not managed by `platform-infra`. The current
-MVP stores them through the `generator-worker` deployment on
-`generator-worker-artifacts-pvc` under
-`/var/lib/generator-worker/manifests/<serviceName>-<requestId>/`. This is not a
-real Artifact Store, and `deployment-worker` remains outside the MVP.
+## MinIO Artifact Store (local/dev only)
+
+MinIO runs as a single replica in `scaffoldops-dev`, persists data on
+`minio-data` (5Gi), and exposes the S3 API at `http://minio:9000` to workloads
+in that namespace. Cross-namespace clients use
+`http://minio.scaffoldops-dev.svc.cluster.local:9000`.
+The `minio-create-bucket` Job retries until MinIO is ready and creates
+`scaffoldops-artifacts` with `mc mb --ignore-existing`, so repeated runs are
+safe. It has a ten-minute deadline and completed Jobs are removed after five
+minutes. Reapplying the overlay after removal runs bootstrap again. Inspect a
+failed Job's logs; after resolving the cause, delete only the Job and reapply:
+
+```bash
+kubectl -n scaffoldops-dev logs job/minio-create-bucket
+kubectl -n scaffoldops-dev delete job minio-create-bucket
+kubectl apply -k k8s/overlays/dev
+```
+
+Configure `generator-worker` in its own repository with:
+
+```yaml
+env:
+  - name: GENERATOR_ARTIFACT_STORAGE_TYPE
+    value: minio
+  - name: GENERATOR_ARTIFACT_MINIO_ENDPOINT
+    value: http://minio:9000
+  - name: GENERATOR_ARTIFACT_MINIO_BUCKET
+    value: scaffoldops-artifacts
+  - name: GENERATOR_MINIO_ACCESS_KEY
+    valueFrom:
+      secretKeyRef:
+        name: minio-credentials
+        key: MINIO_ROOT_USER
+  - name: GENERATOR_MINIO_SECRET_KEY
+    valueFrom:
+      secretKeyRef:
+        name: minio-credentials
+        key: MINIO_ROOT_PASSWORD
+```
+
+The requested endpoint/bucket names above describe the target configuration.
+The current sibling `generator-worker` checkout instead binds
+`GENERATOR_MINIO_ENDPOINT` and `GENERATOR_MINIO_BUCKET`; use those names with
+the same values until it supports `GENERATOR_ARTIFACT_MINIO_ENDPOINT` and
+`GENERATOR_ARTIFACT_MINIO_BUCKET`. Its credential variables are
+`GENERATOR_MINIO_ACCESS_KEY` and `GENERATOR_MINIO_SECRET_KEY`, as shown above.
+Its existing deployment references `generator-worker-minio`; consuming
+`minio-credentials` requires updating those references in the worker repository.
+No worker manifests are changed here.
+
+The Secret and worker must be in the same namespace for these references.
+The checked-in `minioadmin` / `minioadmin` credentials are public, local
+Minikube defaults only, and are unsuitable for production. This setup has no
+TLS or HA and does not provision a Docker Registry. Application workloads and
+backend selection are managed outside this repository.
+
+Check MinIO and bucket initialization:
+
+```bash
+kubectl -n scaffoldops-dev rollout status deployment/minio
+kubectl -n scaffoldops-dev wait --for=condition=complete job/minio-create-bucket --timeout=600s
+kubectl -n scaffoldops-dev port-forward svc/minio 9000:9000 9001:9001
+```
+
+The console is available at `http://localhost:9001` while forwarding. Wait for
+the Job before its five-minute cleanup window expires; if it has already been
+removed, inspect the bucket in the console or reapply the overlay.
+
+Artifact cleanup is application-owned and asynchronous:
+
+```text
+DELETE /generation-requests/{id}
+  -> generator-api deletes the request record and publishes artifact-cleanup-requested
+  -> Kafka topic artifact-cleanup-requested
+  -> generator-worker consumes the event
+  -> generator-worker deletes the artifact using its configured storage backend
+```
+
+`generator-api` owns request lifecycle state and the deletion API.
+`generator-worker` owns generated artifacts and storage cleanup. `generator-api`
+must not access the worker PVC directly. Cleanup is eventually consistent, not
+transactional with the PostgreSQL delete. If `generator-worker` is down,
+cleanup waits until Kafka is consumed; full reconciliation of stuck cleanup or
+generation states remains future work.
+
+Operational cleanup check for the filesystem backend (for MinIO, inspect the artifact in the bucket instead):
+
+```bash
+kubectl -n scaffoldops-dev exec deploy/generator-worker -- ls -la /var/lib/generator-worker/manifests
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:8081/api/generator/v1/generation-requests/<requestId>"
+kubectl -n scaffoldops-dev logs deploy/generator-worker --tail=150 | grep -i cleanup
+kubectl -n scaffoldops-dev exec deploy/generator-worker -- test ! -d /var/lib/generator-worker/manifests/<serviceName>-<requestId>
+```
 
 ## Port Forward Keycloak
 
@@ -139,7 +244,7 @@ Default local-dev admin credentials are stored in `k8s/base/security/keycloak-de
 - username: `admin`
 - password: `admin`
 
-Keycloak's database password is stored separately in `k8s/base/security/keycloak-dev-db-secret.yaml` because the Keycloak pod runs in the `security` namespace while PostgreSQL runs in `scaffoldops-dev`, and Kubernetes secrets are namespace-scoped.
+Keycloak's database password is stored separately in `k8s/base/security/keycloak-dev-db-secret.yaml` because the Keycloak pod runs in the `security` namespace while PostgreSQL runs in `scaffoldops`, and Kubernetes secrets are namespace-scoped.
 
 Shared PostgreSQL credentials are stored in `k8s/base/database/postgres-secret.yaml`. The bootstrap script creates one logical database per service inside the same PostgreSQL instance:
 
@@ -178,8 +283,8 @@ http://localhost:8080
 
 - `kubectl` points to the target cluster before applying an overlay.
 - The active platform namespaces managed here are `security`, `scaffoldops`, and `scaffoldops-dev`.
-- `k8s/overlays/local-dev` deploys namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, and the Kafka topic bootstrap job.
-- `k8s/overlays/dev` deploys namespaces, Kafka, Kafka UI, and the Kafka topic bootstrap job.
+- `k8s/overlays/local-dev` deploys namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, MinIO, PostgreSQL aliases, and both bootstrap jobs.
+- `k8s/overlays/dev` deploys namespaces, Kafka, Kafka UI, MinIO, PostgreSQL aliases, and both bootstrap jobs; it consumes the existing shared PostgreSQL instance.
 - PostgreSQL runs from `postgres:16` with one PVC in `scaffoldops`.
 - The PostgreSQL init script is mounted from a ConfigMap and runs through `/docker-entrypoint-initdb.d`.
 - Keycloak runs in dev mode with the container image `quay.io/keycloak/keycloak:latest` in `security`.

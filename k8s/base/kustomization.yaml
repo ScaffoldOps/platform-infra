@@ -4,5 +4,7 @@ kind: Kustomization
 resources:
   - namespaces
   - database
+  - database-dev-aliases
+  - minio
   - kafka
   - security
