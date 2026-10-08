@@ -11,7 +11,7 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: minio-create-bucket
-          image: quay.io/minio/mc:RELEASE.2025-04-16T18-13-26Z
+          image: minio/mc:RELEASE.2025-04-16T18-13-26Z
           imagePullPolicy: IfNotPresent
           envFrom:
             - secretRef:
