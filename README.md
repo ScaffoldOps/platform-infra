@@ -166,6 +166,18 @@ artifact-cleanup-requested
 
 ## MinIO Artifact Store (local/dev only)
 
+Local/dev Minikube uses the public community-maintained images
+`pgsty/minio:latest` and `pgsty/mc:latest` from Docker Hub. The requested
+`quay.io/minio/minio:latest` and `quay.io/minio/mc:latest` returned unauthorized
+when tested, so these compatible MinIO community images are used instead.
+Both images were pulled successfully and tested with `minio server /data
+--console-address :9001`, `mc alias set`, `mc ready`, and repeated
+`mc mb --ignore-existing` bucket creation. See the publisher's
+[server image](https://hub.docker.com/r/pgsty/minio) and
+[client image](https://hub.docker.com/r/pgsty/mc) documentation.
+Production should pin tested image versions or digests rather than `latest`.
+The current `IfNotPresent` pull policy can reuse a node's cached `latest` image.
+
 MinIO runs as a single replica in `scaffoldops-dev`, persists data on
 `minio-data` (5Gi), and exposes the S3 API at `http://minio:9000` to workloads
 in that namespace. Cross-namespace clients use
