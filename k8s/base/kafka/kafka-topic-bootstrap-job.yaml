@@ -3,7 +3,7 @@ kind: Job
 metadata:
   name: kafka-topic-bootstrap
 spec:
-  ttlSecondsAfterFinished: 300
+  activeDeadlineSeconds: 600
   backoffLimit: 6
   template:
     spec:
@@ -21,18 +21,10 @@ spec:
                 sleep 5
               done
 
-              kafka-topics \
-                --bootstrap-server kafka:9092 \
-                --create \
-                --if-not-exists \
-                --topic generation-requested \
-                --partitions 1 \
-                --replication-factor 1
-
-              kafka-topics \
-                --bootstrap-server kafka:9092 \
-                --create \
-                --if-not-exists \
-                --topic artifact-cleanup-requested \
-                --partitions 1 \
-                --replication-factor 1
+              for topic in generation-requested generation-requested-dlt artifact-cleanup-requested deployment-requested undeployment-requested image-build-retry-requested; do
+                kafka-topics \
+                  --bootstrap-server kafka:9092 \
+                  --create --if-not-exists \
+                  --topic "$topic" \
+                  --partitions 1 --replication-factor 1
+              done

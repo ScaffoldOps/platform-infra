@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: scaffoldops-pre
+
+resources:
+  - ../../../base/database
+
+# Credentials belong to the runtime provisioner, not this overlay.
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: postgres-credentials
+      $patch: delete
+  - target:
+      kind: ConfigMap
+      name: postgres-init-scripts
+    patch: |-
+      - op: add
+        path: /data/02-init-keycloak-pre.sh
+        value: |
+          #!/bin/bash
+          set -euo pipefail
+          export PGPASSWORD="${POSTGRES_PASSWORD}"
+          psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" <<'SQL'
+          SELECT 'CREATE DATABASE keycloakpredb OWNER keycloakuser'
+          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'keycloakpredb')\gexec
+          SQL

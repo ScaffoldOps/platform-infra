@@ -2,7 +2,7 @@
 
 Kubernetes infrastructure source of truth for ScaffoldOps shared platform environments.
 
-## Scope
+This repository is the infrastructure source of truth for the shared platform components that support ScaffoldOps in Kubernetes. It does not own application business logic or per-service application manifests. Its job is to provide the common platform layer that application repositories depend on.
 
 This repository currently owns the shared platform infrastructure that is visible in the cluster:
 
@@ -12,7 +12,7 @@ This repository currently owns the shared platform infrastructure that is visibl
 - Kafka, Kafka UI, and topic bootstrap manifests in the `scaffoldops-dev` namespace
 - MinIO Artifact Store, bucket bootstrap, and PostgreSQL DNS aliases in `scaffoldops-dev`
 
-This repository does not define product-specific application namespaces or workloads. Application repositories consume the shared infrastructure managed here.
+`platform-infra` exists to define and deploy the shared platform infrastructure used by ScaffoldOps. Today that includes:
 
 Generated artifacts can use the shared MinIO Artifact Store. Filesystem storage
 and its PVC remain application-owned when that backend is selected. PostgreSQL
@@ -23,6 +23,10 @@ in Docker Registry; MinIO stores artifacts, not Docker images.
 ## Structure
 
 ```text
+.github/
+  workflows/
+    deploy.yml
+    platform-infra.yml
 k8s/
   base/
     kustomization.yaml
@@ -35,6 +39,12 @@ k8s/
   overlays/
     dev/
     local-dev/
+    pre/
+scripts/
+  bootstrap-local-dev-images.sh
+  deploy-environment.sh
+  provision-pre.py
+  validate-readiness.py
 ```
 
 - `k8s/base/database`: shared PostgreSQL instance, PVC, service, secret, and init scripts
@@ -44,14 +54,44 @@ k8s/
 - `k8s/base/namespaces`: namespace bootstrap manifests
 - `k8s/base/security`: shared security infrastructure for local dev
 - `k8s/overlays/local-dev`: local Minikube entrypoint for namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, and MinIO
-- `k8s/overlays/dev`: complete DEV entrypoint for the shared base infrastructure; PRE Keycloak is scaled to zero
+- `k8s/overlays/dev`: shared compatibility PostgreSQL plus isolated DEV infrastructure; never manages PRE
+- `k8s/overlays/pre`: PRE-only infrastructure, external runtime Secrets, and `keycloak-pre` in `security`
 
-## Deploy
+- `.github/workflows`
+  - `platform-infra.yml`: validation workflow for push and pull request events
+  - `deploy.yml`: manual deployment workflow for the selected DEV or PRE overlay
 
-Apply the local-dev overlay:
+- `k8s/base`
+  - shared base Kustomize entrypoint that composes namespaces, database, and security resources
 
-```bash
-kubectl apply -k k8s/overlays/local-dev
+- `k8s/base/namespaces`
+  - namespace manifests for `security` and `scaffoldops`
+
+- `k8s/base/database`
+  - shared PostgreSQL Deployment, Service, PVC, secret, and bootstrap ConfigMap
+  - first-initialization bootstrap for roles and logical databases on new PVCs
+
+- `k8s/base/security`
+  - Keycloak Deployment, Service, and secrets
+
+- `k8s/overlays/local-dev`
+  - local Minikube overlay that points to the shared base
+  - adds local-only PostgreSQL external access through a `NodePort` Service
+
+- `scripts/bootstrap-local-dev-images.sh`
+  - helper script to preload required images into Minikube before deploy
+
+## Kustomize Structure
+
+The repository currently follows this composition chain:
+
+```text
+k8s/overlays/local-dev
+  -> ../dev
+    -> ../../base
+    -> namespaces
+    -> database
+    -> security
 ```
 
 Apply the dev overlay:
@@ -70,7 +110,7 @@ kubectl kustomize k8s/overlays/dev
 ## GitHub Actions
 
 **platform-infra** is validation only. Pushes to `main` and `develop` and pull
-requests render and client-dry-run both `local-dev` and `dev`. It has no deploy
+requests validate isolation, render and client-dry-run `local-dev`, `dev`, and `pre`. It has no deploy
 job. The self-hosted runner uses `/home/victor/.kube/config`; API discovery and
 schema access are needed for client dry-runs.
 
@@ -80,11 +120,11 @@ selector, then select the `environment` input:
 
 - `dev` (default) applies `k8s/overlays/dev`, restoring namespaces, shared
   platform resources, dev PostgreSQL Services, Kafka, Kafka UI, Keycloak,
-  MinIO, and bootstrap Jobs. DEV Keycloak runs in `security`; PRE Keycloak is
-  kept scaled to zero.
-- `pre` maps exclusively to `k8s/overlays/pre`. That overlay is not implemented
-  yet: only partial PRE Keycloak resources exist. Selecting PRE fails clearly
-  before any cluster changes; it never falls back to DEV.
+  MinIO, and bootstrap Jobs. DEV Keycloak runs in `security`; no PRE objects
+  are rendered or scaled by DEV.
+- `pre` maps exclusively to `k8s/overlays/pre`, creates `scaffoldops-pre` and
+  `generated-pre`, and manages only PRE infrastructure plus the `keycloak-pre`
+  Deployment and Service in `security`. It never applies Secret objects.
 
 The separate `deploy.yml` workflow runs only on `workflow_dispatch`. It
 validates the selected overlay before applying and serializes manual deploys
@@ -95,17 +135,79 @@ on the Minikube runner. Pushes and PRs never deploy.
 `scaffoldops-pre` namespace, using `--ignore-not-found`, then reapplies the
 overlay. Both jobs initialize resources idempotently. With false, existing
 Jobs are retained; missing Jobs are still created by apply. The workflow
-waits for both Jobs when requested and checks present deployments; rollout
-failures are reported instead of ignored.
+always waits for both Jobs and all expected deployments; missing objects and
+rollout failures are errors. Completed Jobs are retained until explicit
+recreation, so their absence is never treated as evidence of success.
 
-Applying restores missing Deployments, Services, ConfigMaps, Secrets, and
-other declared resources. The workflow does not delete namespaces, PVCs, or
+Applying restores missing declared resources. DEV includes its existing
+credential manifests; PRE only references externally provisioned Secrets.
+The workflow does not delete namespaces, PVCs, or
 persisted MinIO, PostgreSQL, or Kafka data. Existing PVCs are reused. If storage
 was deleted separately, applying cannot recover lost data.
 
 ## Verify
 
-Check that the expected namespaces, PostgreSQL resources, and Keycloak resources exist:
+## Deployment Model
+
+The infrastructure is deployed with Kustomize:
+
+```bash
+kubectl apply -k k8s/overlays/local-dev
+```
+
+The current deployment model is local-dev oriented:
+
+- the active overlay is `k8s/overlays/local-dev`
+- the target cluster is expected to be a local Minikube cluster
+- the manual GitHub Actions deploy workflow assumes a self-hosted runner with access to the same local kubeconfig and Minikube environment
+
+The workflows currently behave as follows:
+
+- validation workflow:
+  - validates isolation and renders local-dev, DEV and PRE overlays
+  - performs client-side `kubectl apply --dry-run=client`
+
+- manual deploy workflow:
+  - renders the selected DEV or PRE overlay
+  - preflights PRE runtime Secrets before changing infrastructure
+  - validates manifests client-side
+  - applies the overlay to the cluster
+
+## Common Commands
+
+Check the current Kubernetes context:
+
+```bash
+kubectl config current-context
+kubectl cluster-info
+```
+
+Render manifests:
+
+```bash
+kubectl kustomize k8s/overlays/local-dev
+```
+
+Validate manifests locally:
+
+```bash
+kubectl kustomize k8s/overlays/local-dev > rendered-local-dev.yaml
+kubectl apply --dry-run=client -f rendered-local-dev.yaml
+```
+
+Preload local-dev images into Minikube:
+
+```bash
+./scripts/bootstrap-local-dev-images.sh
+```
+
+Apply the overlay:
+
+```bash
+kubectl apply -k k8s/overlays/local-dev
+```
+
+Inspect platform resources:
 
 ```bash
 kubectl get ns
@@ -149,7 +251,8 @@ PostgreSQL Deployment and PVC remain unchanged.
 The active dev realm is `scaffoldops-dev`, matching generator-api JWKS
 validation and generator-worker token requests. PRE Keycloak is configured for
 `postgres.scaffoldops-pre.svc.cluster.local` and database `keycloakdb`, with
-PRE-specific credentials; a complete PRE overlay is not yet implemented.
+PRE-specific credentials and a separate `keycloakpredb` database. The legacy
+PRE `keycloakdb` database must remain unchanged.
 Local/dev Keycloak admin credentials are `admin` / `admin123` from
 `keycloak-dev-admin`. Keycloak bootstrap admin environment settings only
 create the account when the master realm is first initialized. If an existing
@@ -172,10 +275,14 @@ Expected Kafka topics ensured by platform-infra:
 
 ```text
 generation-requested
+generation-requested-dlt
 artifact-cleanup-requested
+deployment-requested
+undeployment-requested
+image-build-retry-requested
 ```
 
-## MinIO Artifact Store (local/dev only)
+## MinIO Artifact Store
 
 Local/dev Minikube uses the public community-maintained images
 `pgsty/minio:latest` and `pgsty/mc:latest` from Docker Hub. The requested
@@ -195,8 +302,7 @@ in that namespace. Cross-namespace clients use
 `http://minio.scaffoldops-dev.svc.cluster.local:9000`.
 The `minio-create-bucket` Job retries until MinIO is ready and creates
 `scaffoldops-artifacts` with `mc mb --ignore-existing`, so repeated runs are
-safe. It has a ten-minute deadline and completed Jobs are removed after five
-minutes. Reapplying the overlay after removal runs bootstrap again. Inspect a
+safe. It has a ten-minute deadline and completed Jobs are retained. Inspect a
 failed Job's logs; after resolving the cause, delete only the Job and reapply:
 
 ```bash
@@ -233,7 +339,7 @@ The current sibling `generator-worker` checkout instead binds
 the same values until it supports `GENERATOR_ARTIFACT_MINIO_ENDPOINT` and
 `GENERATOR_ARTIFACT_MINIO_BUCKET`. Its credential variables are
 `GENERATOR_MINIO_ACCESS_KEY` and `GENERATOR_MINIO_SECRET_KEY`, as shown above.
-`minio-credentials` is the canonical infrastructure Secret. Both overlays also
+`minio-credentials` is the canonical infrastructure Secret. DEV and local-dev also
 provide a compatibility Secret named `generator-worker-minio` in
 `scaffoldops-dev`, matching the current worker deployment's `access-key` and
 `secret-key` references. Kustomize copies these values from `MINIO_ROOT_USER`
@@ -260,8 +366,7 @@ kubectl -n scaffoldops-dev port-forward svc/minio 9000:9000 9001:9001
 ```
 
 The console is available at `http://localhost:9001` while forwarding. Wait for
-the Job before its five-minute cleanup window expires; if it has already been
-removed, inspect the bucket in the console or reapply the overlay.
+the Job to complete; inspect its retained status and logs for evidence.
 
 Artifact cleanup is application-owned and asynchronous:
 
@@ -307,17 +412,15 @@ http://localhost:8080
 
 Default local-dev admin credentials are stored in `k8s/base/security/keycloak-dev-admin-secret.yaml` and currently match the live Minikube deployment:
 
-- username: `admin`
-- password: `admin`
+```bash
+minikube ip
+```
 
 Keycloak's database password is stored separately in `k8s/base/security/keycloak-dev-db-secret.yaml` because the Keycloak pod runs in the `security` namespace while dev PostgreSQL runs in `scaffoldops-dev`, and Kubernetes secrets are namespace-scoped.
 
-Shared PostgreSQL credentials are stored in `k8s/base/database/postgres-secret.yaml`. The bootstrap script creates one logical database per service inside the same PostgreSQL instance:
+PostgreSQL is managed here as shared platform infrastructure.
 
-- `keycloakdb` owned by `keycloakuser`
-- `generatorapidb` owned by `generatorapiuser`
-- `generatorworkerdb` owned by `generatorworkeruser`
-- `deploymentworkerdb` owned by `deploymentworkeruser`
+Current model:
 
 Kafka is included in the active base render path, so `k8s/overlays/local-dev` and `k8s/overlays/dev` both render the broker resources in `scaffoldops-dev`.
 
@@ -350,10 +453,10 @@ http://localhost:8080
 - `kubectl` points to the target cluster before applying an overlay.
 - The active platform namespaces managed here are `security`, `scaffoldops`, and `scaffoldops-dev`.
 - `k8s/overlays/local-dev` deploys namespaces, PostgreSQL, Keycloak, Kafka, Kafka UI, MinIO, PostgreSQL aliases, and both bootstrap jobs.
-- `k8s/overlays/dev` deploys the full shared base infrastructure and scales PRE Keycloak to zero.
+- `k8s/overlays/dev` deploys shared compatibility PostgreSQL and DEV infrastructure without touching PRE.
 - PostgreSQL runs from `postgres:16` with one PVC in `scaffoldops`.
 - The PostgreSQL init script is mounted from a ConfigMap and runs through `/docker-entrypoint-initdb.d`.
-- Keycloak runs in dev mode with the container image `quay.io/keycloak/keycloak:latest` in `security`.
+- Keycloak runs in dev mode with the container image `quay.io/keycloak/keycloak:26.1.4` in `security`.
 - Kafka runs as a single-node KRaft broker from `confluentinc/cp-kafka:7.7.7` in `scaffoldops-dev`.
 - Kafka UI runs from `provectuslabs/kafka-ui:v0.7.2` in `scaffoldops-dev` and connects to `kafka:9092`.
 - The `generation-requested` and `artifact-cleanup-requested` topics are bootstrap-created by a Kubernetes Job in `scaffoldops-dev`.
@@ -361,14 +464,147 @@ http://localhost:8080
 
 ## MVP Environment
 
-For the MVP only DEV is active:
+DEV identity:
 
 - Keycloak service: `keycloak-dev.security.svc.cluster.local`
 - Keycloak realm: `scaffoldops-dev`
-- PRE can stay powered off unless it is explicitly needed later.
+- PRE is independently deployed and is never scaled by the DEV overlay.
 
-Scale PRE Keycloak down with:
+## PRE Runbook
+
+Use the selected cluster context deliberately. Requirements: `kubectl`, Bash,
+Python 3 and PyYAML (`python3 -c 'import yaml'`); the provisioning utility uses
+only the Python standard library. Validation does not deploy. The manual
+workflow uses the same deployment script as these commands.
+
+### Ownership and Storage
+
+PRE owns infrastructure in `scaffoldops-pre`, creates `generated-pre` for
+application-generated workloads, and manages only the `keycloak-pre`
+Deployment/Service in existing namespace `security`. DEV and local-dev retain
+the shared PostgreSQL instance in `scaffoldops` plus their separate DEV
+PostgreSQL and `postgres`/`postgres-dev` ClusterIP Services in `scaffoldops-dev`.
+Local-dev additionally exposes `postgres-external` on NodePort 30432.
+
+Reuse PRE PVCs `postgres-data` and `kafka-data`; MinIO adds `minio-data` (5Gi).
+Never delete PVCs, reset data directories, or run prune/namespace deletion to
+recover a rollout. Back up existing data before database maintenance.
+The PostgreSQL init scripts run only on an empty PVC, use top-level psql
+`SELECT ... WHERE NOT EXISTS ... \gexec` (not variables inside dollar-quoted
+DO blocks), and never rotate existing role passwords on restart or apply.
+
+PRE Keycloak uses `postgres.scaffoldops-pre.svc.cluster.local:5432`, database
+`keycloakpredb`, owner `keycloakuser`, and realm `scaffoldops-pre`. Do not point
+it at legacy `keycloakdb`: that database has incompatible Liquibase checksums
+and legacy realm state and must remain unchanged. For an existing PVC, create
+only the new empty database with the explicit provisioner phase below. Fresh
+PRE PVC initialization creates both databases without migrating the legacy one.
+
+### Runtime Secret Contract
+
+The PRE overlay emits **zero Secrets** and never overwrites PostgreSQL or
+Keycloak credentials. The infrastructure preflight checks existence and
+nonempty keys without printing values:
+
+| Namespace | Secret | Required keys |
+| --- | --- | --- |
+| scaffoldops-pre | postgres-credentials | POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_KEYCLOAK_PASSWORD, POSTGRES_GENERATOR_API_PASSWORD, POSTGRES_GENERATOR_WORKER_PASSWORD, POSTGRES_DEPLOYMENT_WORKER_PASSWORD |
+| scaffoldops-pre | minio-credentials | MINIO_ROOT_USER, MINIO_ROOT_PASSWORD |
+| scaffoldops-pre | generator-worker-minio | access-key, secret-key |
+| security | keycloak-pre-admin | KC_BOOTSTRAP_ADMIN_USERNAME, KC_BOOTSTRAP_ADMIN_PASSWORD |
+| security | keycloak-pre-db | KC_DB_PASSWORD |
+
+The database role password and `keycloak-pre-db` must already agree. Preflight
+does not inspect password values or rotate credentials. Bootstrap admin
+variables do not reset an existing Keycloak admin account.
+
+The optional provisioning utility preserves existing MinIO credentials,
+creates a unique password only if absent, and synchronizes the worker alias.
+It copies `docker-hub-pull-secret` to `scaffoldops-pre` and `generated-pre` and
+`docker-hub-credentials` to `scaffoldops-pre` only when missing, using DEV as
+the explicitly shared registry credential source. It preserves other pull
+secrets on the generated namespace's default ServiceAccount. It never changes
+PostgreSQL or Keycloak admin/DB secrets. Do not log/dump Secret JSON.
+
+### Review and Deploy
 
 ```bash
-kubectl -n security scale deploy/keycloak-pre --replicas=0
+python3 scripts/validate-readiness.py validate
+python3 scripts/validate-readiness.py validate pre --output /tmp/platform-infra-pre.yaml
+python3 scripts/validate-readiness.py preflight pre
+kubectl apply --dry-run=client -f /tmp/platform-infra-pre.yaml
 ```
+
+For first-time provisioning or repair, run only the phases needed. These are
+explicit live operations, never invoked by CI or infrastructure deployment:
+
+```bash
+python3 scripts/provision-pre.py runtime
+# Requires the existing PRE PostgreSQL Deployment; creates only keycloakpredb if absent.
+python3 scripts/provision-pre.py database
+```
+
+After review and with required secrets ready:
+
+```bash
+bash scripts/deploy-environment.sh pre true
+```
+
+The script validates the exact render it applies, preflights before mutations,
+client-dry-runs, recreates only the two PRE bootstrap Jobs, applies, waits for
+both Jobs, and requires rollouts of postgres/kafka/kafka-ui/minio/keycloak-pre.
+No PVC or namespace deletion is used. `false` retains Jobs; missing Jobs are
+still created and checked. Use `true` after changes to immutable Job templates
+or to rerun bootstrap. Manual deployments should not overlap a workflow run.
+
+Kafka uses the same working `confluentinc/cp-kafka:7.7.7` single-node config
+as DEV, with quorum voters `1@localhost:9093`. If an existing broker still
+crash-loops after apply, inspect logs and persisted cluster ID; do not clear
+`kafka-data`. Topic bootstrap ensures all six topics listed above. MinIO uses
+`pgsty/minio:latest` and `pgsty/mc:latest`, creates `scaffoldops-artifacts`, and
+is reachable at `http://minio.scaffoldops-pre.svc.cluster.local:9000`.
+
+### OAuth and Runtime Verification
+
+After Keycloak starts on `keycloakpredb`:
+
+PRE startup and readiness probes use `/health/started` and `/health/ready` on
+management port 9000. Health and metrics are enabled so readiness includes the
+database connection check. The Service exposes only application HTTP, not the
+management port. See the version-matched
+[Keycloak 26.1.4 health guide](https://github.com/keycloak/keycloak/blob/26.1.4/docs/guides/observability/health.adoc).
+With these probes, rollout status waits for Keycloak readiness, not just a
+running process. OAuth token issuance is checked separately by provisioning.
+
+```bash
+python3 scripts/provision-pre.py keycloak
+kubectl -n scaffoldops-pre get deploy,svc,pvc,job
+kubectl -n scaffoldops-pre logs job/kafka-topic-bootstrap
+kubectl -n scaffoldops-pre logs job/minio-create-bucket
+kubectl -n security rollout status deployment/keycloak-pre --timeout=300s
+```
+
+The utility idempotently creates realm `scaffoldops-pre` and confidential
+service-account clients `scaffoldops-generator-worker` and `deployment-worker`.
+It reads their existing client secrets without rotating them, synchronizes
+`generator-api-worker-client` (`client-secret`) and `deployment-worker-oauth`
+(`client-secret`, `token-url`) in `scaffoldops-pre`, and verifies token issuance
+without logging tokens. The token URL is
+`http://keycloak-pre.security.svc.cluster.local:8080/realms/scaffoldops-pre/protocol/openid-connect/token`.
+Use `--port` to choose another local port if 19080 is occupied. Application
+images, application deployments, authorization roles, and end-to-end API
+checks remain owned by application repositories and runtime provisioning.
+Test with published develop images before promoting any branch; no merge is
+required to render or review these files.
+
+### Regression Tests
+
+```bash
+python3 -m unittest discover -s tests -p test_readiness.py -v
+# Includes a disposable Docker postgres:16 integration test; no Kubernetes writes.
+python3 -m unittest discover -s tests -v
+```
+
+The PostgreSQL integration test exercises quoted passwords, fresh role/database
+creation, repeated execution without password rotation, and preservation of a
+legacy database marker. Its container uses tmpfs, never any cluster PVC.
