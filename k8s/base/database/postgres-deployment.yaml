@@ -18,12 +18,6 @@ spec:
         - name: postgres
           image: postgres:16
           imagePullPolicy: IfNotPresent
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - /bin/bash
-                  - /docker-entrypoint-initdb.d/01-init-multiple-databases.sh
           ports:
             - name: postgres
               containerPort: 5432

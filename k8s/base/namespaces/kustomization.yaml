@@ -3,5 +3,5 @@ kind: Kustomization
 
 resources:
   - security.yaml
+  - scaffoldops.yaml
   - scaffoldops-dev.yaml
-  - scaffoldops-pre.yaml

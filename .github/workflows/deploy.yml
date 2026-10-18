@@ -2,37 +2,66 @@ name: deploy
 
 on:
   workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        required: true
+        default: dev
+        options:
+          - dev
+          - pre
+      runBootstrapJobs:
+        description: Recreate bootstrap jobs before applying infrastructure
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platform-infra-minikube-deploy
+  cancel-in-progress: false
 
 jobs:
-  deploy-local-dev:
+  deploy-selected-environment:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, Linux, X64]
     env:
       KUBECONFIG: /home/victor/.kube/config
+      TARGET_ENVIRONMENT: ${{ inputs.environment }}
+      RUN_BOOTSTRAP_JOBS: ${{ inputs.runBootstrapJobs }}
     steps:
-      - name: Checkout
+      - name: Checkout selected branch
         uses: actions/checkout@v4
+
+      - name: Select and check overlay
+        run: |
+          case "$TARGET_ENVIRONMENT" in
+            dev|pre) ;;
+            *) echo "Unsupported environment: $TARGET_ENVIRONMENT" >&2; exit 1 ;;
+          esac
+          overlay="k8s/overlays/$TARGET_ENVIRONMENT"
+          if [ ! -d "$overlay" ]; then
+            echo "::error::The $TARGET_ENVIRONMENT overlay ($overlay) is not implemented on the selected branch. Implement it before deploying this environment. No infrastructure has been changed."
+            exit 1
+          fi
+          echo "OVERLAY=$overlay" >> "$GITHUB_ENV"
+          echo "APP_NAMESPACE=scaffoldops-$TARGET_ENVIRONMENT" >> "$GITHUB_ENV"
+
+      - name: Check validation dependencies
+        run: python3 -c 'import yaml'
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
         with:
           version: v1.32.0
 
-      - name: Preload local-dev images into Minikube
-        run: ./scripts/bootstrap-local-dev-images.sh
-
-      - name: Debug Kubernetes access
+      - name: Check Kubernetes access
         run: |
-          echo "RUNNER_NAME=$RUNNER_NAME"
-          echo "HOME=$HOME"
-          echo "KUBECONFIG=$KUBECONFIG"
           kubectl config current-context
           kubectl cluster-info
 
-      - name: Render local-dev overlay
-        run: kubectl kustomize k8s/overlays/local-dev > rendered-local-dev.yaml
-
-      - name: Client-side manifest validation
-        run: kubectl apply --dry-run=client -f rendered-local-dev.yaml
-
-      - name: Deploy shared platform infrastructure
-        run: kubectl apply -k k8s/overlays/local-dev
+      - name: Validate, preflight, apply and verify selected environment
+        run: bash scripts/deploy-environment.sh "$TARGET_ENVIRONMENT" "$RUN_BOOTSTRAP_JOBS"

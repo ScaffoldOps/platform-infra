@@ -1,0 +1,32 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: scaffoldops-dev
+
+resources:
+  - minio-credentials-secret.yaml
+  - generator-worker-minio-secret.yaml
+  - runtime
+
+# Keep the worker compatibility Secret synchronized with canonical credentials.
+replacements:
+  - source:
+      kind: Secret
+      name: minio-credentials
+      fieldPath: stringData.MINIO_ROOT_USER
+    targets:
+      - select:
+          kind: Secret
+          name: generator-worker-minio
+        fieldPaths:
+          - stringData.access-key
+  - source:
+      kind: Secret
+      name: minio-credentials
+      fieldPath: stringData.MINIO_ROOT_PASSWORD
+    targets:
+      - select:
+          kind: Secret
+          name: generator-worker-minio
+        fieldPaths:
+          - stringData.secret-key

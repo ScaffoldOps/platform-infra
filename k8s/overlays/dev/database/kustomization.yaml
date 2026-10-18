@@ -5,3 +5,12 @@ namespace: scaffoldops-dev
 
 resources:
   - ../../../base/database
+
+# The existing DEV alias owns this Service and selects these database pods.
+patches:
+  - patch: |-
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: postgres
+      $patch: delete
