@@ -3,7 +3,6 @@ kind: Job
 metadata:
   name: minio-create-bucket
 spec:
-  ttlSecondsAfterFinished: 300
   backoffLimit: 6
   activeDeadlineSeconds: 600
   template:

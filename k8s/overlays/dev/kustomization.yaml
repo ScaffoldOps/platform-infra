@@ -3,14 +3,4 @@ kind: Kustomization
 
 resources:
   - ../../base
-
-# PRE is inactive in the local DEV environment.
-patches:
-  - target:
-      kind: Deployment
-      name: keycloak-pre
-      namespace: security
-    patch: |-
-      - op: replace
-        path: /spec/replicas
-        value: 0
+  - database
